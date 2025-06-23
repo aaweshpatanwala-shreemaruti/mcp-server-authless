@@ -17,8 +17,8 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "MyMCP",
-				"name": "MCP_OBJECT"
+				"class_name": "MyMCP", // This must match the class name exported in src/index.ts
+				"name": "MCP_OBJECT" // This is the name your Worker uses to access the DO (e.g., env.MCP_OBJECT)
 			}
 		]
 	},
