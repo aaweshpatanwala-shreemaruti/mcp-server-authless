@@ -25,7 +25,8 @@ declare global {
 // MyMCP will no longer extend McpAgent directly.
 // Instead, it will create and manage an instance of McpServer.
 export class MyMCP {
-    private mcpServer: McpServer; // Use a private property to hold the McpServer instance
+    // This is the correct name for the McpServer instance
+    private mcpServer: McpServer;
     private state: DurableObjectState;
     // private env: Env; // Uncomment if your DO needs direct access to env bindings
 
@@ -42,13 +43,12 @@ export class MyMCP {
         });
 
         // Register the tools with the internal mcpServer instance.
-        this.initTools(); // Renamed to avoid confusion with `McpAgent`'s `init`
+        this.initTools();
     }
 
-    // Renamed from `init` to `initTools` for clarity
     async initTools() {
         // Simple addition tool
-        this.mcpServer.tool( // Use this.mcpServer
+        this.mcpServer.tool( // *** CORRECTED: Use this.mcpServer ***
             "add",
             { a: z.number(), b: z.number() },
             async ({ a, b }, context: { authToken?: string }) => {
@@ -60,7 +60,7 @@ export class MyMCP {
         );
 
         // Calculator tool with multiple operations
-        this.mcpServer.tool( // Use this.mcpServer
+        this.mcpServer.tool( // *** CORRECTED: Use this.mcpServer ***
             "calculate",
             {
                 operation: z.enum(["add", "subtract", "multiply", "divide"]),
@@ -115,10 +115,12 @@ export class MyMCP {
 
         // Route requests using the internal mcpServer instance
         if (url.pathname === "/sse" || url.pathname === "/sse/message") {
+            // *** CORRECTED: Use this.mcpServer ***
             return this.mcpServer.serveSSE("/sse").fetch(request, this.state, context as any);
         }
 
         if (url.pathname === "/mcp") {
+            // *** CORRECTED: Use this.mcpServer ***
             return this.mcpServer.serve("/mcp").fetch(request, this.state, context as any);
         }
 
