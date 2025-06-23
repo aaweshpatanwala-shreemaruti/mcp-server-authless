@@ -2,128 +2,142 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-// Extend the Request type to include a potential 'token' property
-// This is a common pattern for middleware that adds properties to the request object.
-declare global {
-	interface Request {
-		token?: string;
-	}
-}
+// Import DurableObjectState and DurableObject if you're extending it directly
+import { DurableObjectState, DurableObject } from '@cloudflare/workers-types'; // Assuming you have these types installed
 
 // Define our MCP agent with tools
-// We will modify this to accept a token in its constructor or a method.
-export class MyMCP extends McpAgent {
-	server: McpServer;
-	private authToken?: string; // Property to store the auth token
+// MyMCP should now extend DurableObject and accept DurableObjectState
+export class MyMCP extends DurableObject { // Extend DurableObject
+    server: McpServer;
+    private authToken?: string;
+    private state: DurableObjectState; // Store the state object
 
-	constructor(authToken?: string) {
-		super();
-		this.authToken = authToken; // Store the token
-		this.server = new McpServer({
-			name: "Authless Calculator", // You might want to rename this if it's no longer "Authless"
-			version: "1.0.0",
-		});
-		// Call init here to ensure tools are registered when the agent is constructed
-		this.init();
-	}
+    // The constructor must accept DurableObjectState as the first argument
+    constructor(state: DurableObjectState, env: Env) { // env is also commonly passed here
+        super(state, env); // Call the base DurableObject constructor
+        this.state = state; // Store the state object for later use if needed
 
-	async init() {
-		// Simple addition tool
-		this.server.tool(
-			"add",
-			{ a: z.number(), b: z.number() },
-			async ({ a, b }) => {
-				// You can now access this.authToken here
-				console.log("Auth Token in 'add' tool:", this.authToken);
-				return {
-					content: [{ type: "text", text: String(a + b) }],
-				};
-			}
-		);
+        // Initialize McpServer without an initial token, as the token comes per-request
+        this.server = new McpServer({
+            name: "Auth Calculator", // Renamed as it will now handle auth
+            version: "1.0.0",
+        });
 
-		// Calculator tool with multiple operations
-		this.server.tool(
-			"calculate",
-			{
-				operation: z.enum(["add", "subtract", "multiply", "divide"]),
-				a: z.number(),
-				b: z.number(),
-			},
-			async ({ operation, a, b }) => {
-				// You can now access this.authToken here
-				console.log("Auth Token in 'calculate' tool:", this.authToken);
+        // Initialize tools here. The token will be passed via the request context.
+        this.init();
+    }
 
-				let result: number;
-				switch (operation) {
-					case "add":
-						result = a + b;
-						break;
-					case "subtract":
-						result = a - b;
-						break;
-					case "multiply":
-						result = a * b;
-						break;
-					case "divide":
-						if (b === 0)
-							return {
-								content: [
-									{
-										type: "text",
-										text: "Error: Cannot divide by zero",
-									},
-								],
-							};
-						result = a / b;
-						break;
-				}
-				return { content: [{ type: "text", text: String(result) }] };
-			}
-		);
-	}
+    async init() {
+        // Simple addition tool
+        this.server.tool(
+            "add",
+            { a: z.number(), b: z.number() },
+            // The context object passed to tool functions can contain request-specific data
+            async ({ a, b }, context: { authToken?: string }) => {
+                console.log("Auth Token in 'add' tool:", context.authToken);
+                // Use context.authToken for authentication/authorization logic
+                return {
+                    content: [{ type: "text", text: String(a + b) }],
+                };
+            }
+        );
 
-	// You might want a way to get the server instance to serve requests.
-	// This method will provide a new instance of McpServer configured with the agent's tools.
-	getMcpServer() {
-		return this.server;
-	}
+        // Calculator tool with multiple operations
+        this.server.tool(
+            "calculate",
+            {
+                operation: z.enum(["add", "subtract", "multiply", "divide"]),
+                a: z.number(),
+                b: z.number(),
+            },
+            async ({ operation, a, b }, context: { authToken?: string }) => {
+                console.log("Auth Token in 'calculate' tool:", context.authToken);
+                // Use context.authToken for authentication/authorization logic
+
+                let result: number;
+                switch (operation) {
+                    case "add":
+                        result = a + b;
+                        break;
+                    case "subtract":
+                        result = a - b;
+                        break;
+                    case "multiply":
+                        result = a * b;
+                        break;
+                    case "divide":
+                        if (b === 0)
+                            return {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: "Error: Cannot divide by zero",
+                                    },
+                                ],
+                            };
+                        result = a / b;
+                        break;
+                }
+                return { content: [{ type: "text", text: String(result) }] };
+            }
+        );
+    }
+
+    // Handle incoming requests for the Durable Object
+    async fetch(request: Request): Promise<Response> {
+        const url = new URL(request.url);
+
+        // 1. Extract the Auth Token from the request
+        let authToken: string | undefined;
+        const authHeader = request.headers.get("Authorization");
+        if (authHeader && authHeader.startsWith("Bearer ")) {
+            authToken = authHeader.slice(7);
+        }
+
+        // 2. Pass the authToken into the MCP server's context
+        // MCP's serve methods can take a context object as a third argument
+        const context = { authToken }; // Create a context object
+
+        if (url.pathname === "/sse" || url.pathname === "/sse/message") {
+            // Pass the context to serveSSE
+            return this.server.serveSSE("/sse").fetch(request, this.state, context as any); // Type assertion might be needed depending on MCP SDK types
+        }
+
+        if (url.pathname === "/mcp") {
+            // Pass the context to serve
+            return this.server.serve("/mcp").fetch(request, this.state, context as any); // Type assertion might be needed depending on MCP SDK types
+        }
+
+        return new Response("Not found", { status: 404 });
+    }
 }
 
+// The Durable Object binding in your worker entry point
 export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		const url = new URL(request.url);
+    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+        const url = new URL(request.url);
+        let id: DurableObjectId;
+        let stub: DurableObjectStub;
 
-		// 1. Extract the Auth Token
-		// Common ways to pass an auth token:
-		//    a) Via an "Authorization" header (e.g., Bearer token)
-		//    b) Via a query parameter (less secure for sensitive tokens, but simple for examples)
+        if (url.pathname.startsWith("/mcp") || url.pathname.startsWith("/sse")) {
+            // Get or create a Durable Object ID
+            // For a single global DO, you might use a fixed ID:
+            id = env.MY_MCP_DO.idFromName("MySingleMCPInstance");
 
-		let authToken: string | undefined;
+            // Or if you want a new DO per user/session, generate it dynamically:
+            // id = env.MY_MCP_DO.newUniqueId();
 
-		// Option a: From Authorization header
-		const authHeader = request.headers.get("Authorization");
-		if (authHeader && authHeader.startsWith("Bearer ")) {
-			authToken = authHeader.slice(7); // "Bearer ".length = 7
-		}
+            stub = env.MY_MCP_DO.get(id);
 
-		// Option b: From a query parameter (e.g., /mcp?token=YOUR_TOKEN) - Use with caution for sensitive data
-		// if (!authToken) { // Only try query param if not found in header
-		// 	authToken = url.searchParams.get("token");
-		// }
+            // Forward the request to the Durable Object
+            return stub.fetch(request);
+        }
 
-		// 2. Instantiate MyMCP with the token
-		const mcpAgentInstance = new MyMCP(authToken);
-
-		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			// Ensure that serveSSE also correctly uses the instance's server
-			return mcpAgentInstance.getMcpServer().serveSSE("/sse").fetch(request, env, ctx);
-		}
-
-		if (url.pathname === "/mcp") {
-			// Ensure that serve also correctly uses the instance's server
-			return mcpAgentInstance.getMcpServer().serve("/mcp").fetch(request, env, ctx);
-		}
-
-		return new Response("Not found", { status: 404 });
-	},
+        return new Response("Not found", { status: 404 });
+    },
 };
+
+// You need to define your Durable Object in your wrangler.toml:
+// [[durable_objects.bindings]]
+// name = "MY_MCP_DO" # This name should match env.MY_MCP_DO
+// class_name = "MyMCP" # This should match your class export name
