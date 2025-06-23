@@ -2,28 +2,53 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-// Import DurableObjectState and DurableObject if you're extending it directly
-import { DurableObjectState, DurableObject } from '@cloudflare/workers-types'; // Assuming you have these types installed
+// Import necessary types from @cloudflare/workers-types
+// We specifically do NOT import 'DurableObject' as a class to extend.
+import { DurableObjectState, ExecutionContext, Request, Response } from '@cloudflare/workers-types';
 
-// Define our MCP agent with tools
-// MyMCP should now extend DurableObject and accept DurableObjectState
-export class MyMCP extends DurableObject { // Extend DurableObject
+// Declare global types for Env, DurableObjectNamespace, etc.,
+// to make TypeScript aware of these types and your specific binding.
+// This is crucial for type checking in your worker's fetch function.
+declare global {
+    interface Env {
+        // This name 'MCP_OBJECT' must match the 'name' field in your wrangler.jsonc Durable Object binding.
+        MCP_OBJECT: DurableObjectNamespace;
+    }
+    // These interfaces are generally provided by @cloudflare/workers-types,
+    // but explicit declaration can help if you run into type issues or for clarity.
+    interface DurableObjectNamespace {
+        idFromName(name: string): DurableObjectId;
+        get(id: DurableObjectId): DurableObjectStub;
+        newUniqueId(): DurableObjectId;
+    }
+    interface DurableObjectId {}
+    interface DurableObjectStub {
+        fetch(request: Request): Promise<Response>;
+    }
+}
+
+
+// Define your MyMCP class. It does NOT extend a specific 'DurableObject' class.
+// Its behavior as a Durable Object is defined by its constructor signature and fetch method,
+// in conjunction with the wrangler.jsonc configuration.
+export class MyMCP {
     server: McpServer;
-    private authToken?: string;
-    private state: DurableObjectState; // Store the state object
+    private state: DurableObjectState; // Holds the Durable Object state (for storage, etc.)
+    // private env: Env; // You might store env if needed for other Durable Object interactions
 
-    // The constructor must accept DurableObjectState as the first argument
-    constructor(state: DurableObjectState, env: Env) { // env is also commonly passed here
-        super(state, env); // Call the base DurableObject constructor
-        this.state = state; // Store the state object for later use if needed
+    // The constructor signature is crucial for Durable Objects.
+    // It must accept DurableObjectState as the first argument, and Env as the second.
+    constructor(state: DurableObjectState, env: Env) {
+        this.state = state; // Store the state object
+        // this.env = env; // Store env if your DO needs to interact with other bindings
 
-        // Initialize McpServer without an initial token, as the token comes per-request
+        // Initialize McpServer instance. This will be the single server instance for this DO.
         this.server = new McpServer({
-            name: "Auth Calculator", // Renamed as it will now handle auth
+            name: "Auth Calculator", // Descriptive name
             version: "1.0.0",
         });
 
-        // Initialize tools here. The token will be passed via the request context.
+        // Initialize tools immediately upon construction of the Durable Object.
         this.init();
     }
 
@@ -32,10 +57,10 @@ export class MyMCP extends DurableObject { // Extend DurableObject
         this.server.tool(
             "add",
             { a: z.number(), b: z.number() },
-            // The context object passed to tool functions can contain request-specific data
+            // The context object (third argument) will carry our authToken
             async ({ a, b }, context: { authToken?: string }) => {
                 console.log("Auth Token in 'add' tool:", context.authToken);
-                // Use context.authToken for authentication/authorization logic
+                // Implement your authentication/authorization logic here using context.authToken
                 return {
                     content: [{ type: "text", text: String(a + b) }],
                 };
@@ -50,9 +75,10 @@ export class MyMCP extends DurableObject { // Extend DurableObject
                 a: z.number(),
                 b: z.number(),
             },
+            // The context object (third argument) will carry our authToken
             async ({ operation, a, b }, context: { authToken?: string }) => {
                 console.log("Auth Token in 'calculate' tool:", context.authToken);
-                // Use context.authToken for authentication/authorization logic
+                // Implement your authentication/authorization logic here using context.authToken
 
                 let result: number;
                 switch (operation) {
@@ -83,61 +109,63 @@ export class MyMCP extends DurableObject { // Extend DurableObject
         );
     }
 
-    // Handle incoming requests for the Durable Object
+    // The fetch method is the entry point for requests routed to this Durable Object instance.
     async fetch(request: Request): Promise<Response> {
         const url = new URL(request.url);
 
-        // 1. Extract the Auth Token from the request
+        // 1. Extract the Auth Token from the incoming request.
         let authToken: string | undefined;
         const authHeader = request.headers.get("Authorization");
         if (authHeader && authHeader.startsWith("Bearer ")) {
-            authToken = authHeader.slice(7);
+            authToken = authHeader.slice(7); // Extract the token after "Bearer "
         }
 
-        // 2. Pass the authToken into the MCP server's context
-        // MCP's serve methods can take a context object as a third argument
-        const context = { authToken }; // Create a context object
+        // 2. Create a context object to pass to the MCP server's fetch method.
+        // This allows your tools to access the request-specific authToken.
+        const context = { authToken };
 
+        // Route requests based on pathname to MCP server's SSE or standard endpoint.
         if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-            // Pass the context to serveSSE
-            return this.server.serveSSE("/sse").fetch(request, this.state, context as any); // Type assertion might be needed depending on MCP SDK types
+            // MCP SDK's serveSSE.fetch method takes request, DurableObjectState, and an optional context.
+            // The 'as any' is a workaround if the MCP SDK's types aren't perfectly aligned,
+            // but it's generally safe for passing an additional context object.
+            return this.server.serveSSE("/sse").fetch(request, this.state, context as any);
         }
 
         if (url.pathname === "/mcp") {
-            // Pass the context to serve
-            return this.server.serve("/mcp").fetch(request, this.state, context as any); // Type assertion might be needed depending on MCP SDK types
+            // MCP SDK's serve.fetch method takes request, DurableObjectState, and an optional context.
+            return this.server.serve("/mcp").fetch(request, this.state, context as any);
         }
 
-        return new Response("Not found", { status: 404 });
+        // Handle unknown paths within the Durable Object
+        return new Response("Not found within Durable Object", { status: 404 });
     }
 }
 
-// The Durable Object binding in your worker entry point
+
+// This is the main Worker entry point. It handles routing requests to your Durable Object.
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const url = new URL(request.url);
         let id: DurableObjectId;
         let stub: DurableObjectStub;
 
+        // Only route requests intended for the MCP server or SSE to the Durable Object.
+        // All other requests will be handled by the worker itself or return 404.
         if (url.pathname.startsWith("/mcp") || url.pathname.startsWith("/sse")) {
-            // Get or create a Durable Object ID
-            // For a single global DO, you might use a fixed ID:
-            id = env.MY_MCP_DO.idFromName("MySingleMCPInstance");
+            // Get a Durable Object ID.
+            // For a single, long-lived instance, use idFromName with a fixed name.
+            id = env.MCP_OBJECT.idFromName("MySingleMCPInstance");
 
-            // Or if you want a new DO per user/session, generate it dynamically:
-            // id = env.MY_MCP_DO.newUniqueId();
+            // Get a stub to the Durable Object instance.
+            stub = env.MCP_OBJECT.get(id);
 
-            stub = env.MY_MCP_DO.get(id);
-
-            // Forward the request to the Durable Object
+            // Forward the incoming request directly to the Durable Object instance.
+            // The Durable Object's 'fetch' method will then process it.
             return stub.fetch(request);
         }
 
-        return new Response("Not found", { status: 404 });
+        // If the path doesn't match, return a Not Found response from the worker itself.
+        return new Response("Not found in Worker entry point", { status: 404 });
     },
 };
-
-// You need to define your Durable Object in your wrangler.toml:
-// [[durable_objects.bindings]]
-// name = "MY_MCP_DO" # This name should match env.MY_MCP_DO
-// class_name = "MyMCP" # This should match your class export name
